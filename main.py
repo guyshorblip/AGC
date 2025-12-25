@@ -63,10 +63,10 @@ def main():
         )
 
     def stop_recording():
-        # 1️⃣ Signal threads to stop
+        # Signal threads to stop
         stop_flag["stop"] = True
 
-        # 2️⃣ Let audio threads flush remaining buffers
+        # Let audio threads flush remaining buffers
         time.sleep(0.4)
 
         if not original_buffer or not processed_buffer:
@@ -76,11 +76,11 @@ def main():
             )
             return
 
-        # 3️⃣ Finalize buffers
+        # Finalize buffers
         recorded = np.concatenate(original_buffer)
         processed = np.concatenate(processed_buffer)
 
-        # 4️⃣ Ask user where to save
+        # Ask user where to save
         save_path = filedialog.asksaveasfilename(
             defaultextension=".wav",
             filetypes=[("WAV files", "*.wav")]
@@ -89,7 +89,7 @@ def main():
         if not save_path:
             return
 
-        # 5️⃣ Write files
+        # Write files
         sf.write(save_path, recorded, FS)
         sf.write(
             save_path.replace(".wav", "_processed.wav"),
@@ -97,7 +97,7 @@ def main():
             FS
         )
 
-        # 6️⃣ Plot results
+        # Plot results
         plot_signals(recorded, processed, FS, save_path)
 
     # ===============================
