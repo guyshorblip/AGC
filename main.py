@@ -1,214 +1,115 @@
+from AGC_GUI import run_gui
+from AGC_State import AGCState
+from AGC_Algorithm import real_time_agc
+from AGC_Normalization import normalize_audio
+from AGC_Plots import plot_signals
+from AGC_RealTime import start_realtime
+from config import FS
+
+import soundfile as sf
+from tkinter import filedialog, messagebox
+import numpy as np
+import os
+import time
+
+
 def main():
-    import tkinter as tk
-    from tkinter import filedialog, messagebox
-    import os
-    import numpy as np
-    import sounddevice as sd
-    import soundfile as sf
-    import matplotlib.pyplot as plt
-    import queue
-    import threading
-    import sys
+    # ===============================
+    # State & buffers
+    # ===============================
+    agc_state = AGCState()
+    stop_flag = {"stop": False}
+
+    original_buffer = []
+    processed_buffer = []
 
     # ===============================
-    # Configuration
-    # ===============================
-    fs = 44100
-    agc_factor = 0.8
-    EPSILON = 1e-10
-    window_duration = 0.01
-    window_size = int(fs * window_duration)
-
-    # ===============================
-    # AGC State
-    # ===============================
-    audio_window = np.zeros(window_size, dtype=np.float32)
-    window_index = 0
-    current_gain = 1.0
-
-    def reset_agc():
-        nonlocal audio_window, window_index, current_gain
-        audio_window[:] = 0.0
-        window_index = 0
-        current_gain = 1.0
-
-    # ===============================
-    # Recording State
-    # ===============================
-    recording = False
-    audio_queue = queue.Queue()
-    original_audio_buffer = []
-    processed_audio_buffer = []
-
-    # ===============================
-    # DSP Functions
-    # ===============================
-    def normalize_audio(audio, target_rms=0.1):
-        rms = np.sqrt(np.mean(audio ** 2) + EPSILON)
-        audio = audio * (target_rms / rms)
-        return np.clip(audio, -1.0, 1.0)
-
-    def real_time_agc(audio):
-        nonlocal audio_window, window_index, current_gain
-
-        output = np.zeros_like(audio)
-        smoothing = 0.1
-
-        for i in range(len(audio)):
-            audio_window[window_index] = audio[i]
-            window_index = (window_index + 1) % window_size
-
-            max_amp = np.max(np.abs(audio_window)) + EPSILON
-            target_gain = min(1.0 / max_amp * agc_factor, 10.0)
-
-            current_gain = smoothing * target_gain + (1 - smoothing) * current_gain
-            output[i] = audio[i] * current_gain
-
-        return np.clip(output, -1.0, 1.0)
-
-    # ===============================
-    # Plotting
-    # ===============================
-    def plot_signals(original, processed, fs_local, file_path):
-        t_orig = np.arange(len(original)) / fs_local
-        t_proc = np.arange(len(processed)) / fs_local
-
-        N = min(len(original), len(processed))
-        gain = np.abs(processed[:N]) / (np.abs(original[:N]) + EPSILON)
-        t_gain = np.arange(N) / fs_local
-
-        plt.figure(figsize=(14, 10))
-
-        plt.subplot(3, 1, 1)
-        plt.plot(t_orig, original)
-        plt.title("Original Signal (Normalized, Display ±5)")
-        plt.ylim(-5, 5)
-        plt.grid(True)
-        plt.axhline(1, color='gray', linestyle='--', alpha=0.5)
-        plt.axhline(-1, color='gray', linestyle='--', alpha=0.5)
-
-        plt.subplot(3, 1, 2)
-        plt.plot(t_proc, processed)
-        plt.title("Processed Signal (AGC Applied, Display ±5)")
-        plt.ylim(-5, 5)
-        plt.grid(True)
-        plt.axhline(1, color='gray', linestyle='--', alpha=0.5)
-        plt.axhline(-1, color='gray', linestyle='--', alpha=0.5)
-
-        plt.subplot(3, 1, 3)
-        plt.plot(t_gain, gain)
-        plt.title("AGC Gain Over Time")
-        plt.ylim(0, 10)
-        plt.xlabel("Time [s]")
-        plt.grid(True)
-
-        plt.tight_layout()
-        plot_path = os.path.splitext(file_path)[0] + "_plots.png"
-        plt.savefig(plot_path)
-        plt.close()
-
-        try:
-            if sys.platform == "darwin":
-                os.system(f"open '{plot_path}'")
-            elif sys.platform == "win32":
-                os.startfile(plot_path)
-        except Exception:
-            pass
-
-    # ===============================
-    # FILE PROCESSING (NEW)
+    # GUI callbacks
     # ===============================
     def process_file():
-        file_path = filedialog.askopenfilename(
+        path = filedialog.askopenfilename(
             filetypes=[("WAV files", "*.wav")]
         )
-        if not file_path:
+        if not path:
             return
 
-        reset_agc()
+        agc_state.reset()
 
-        audio, fs_local = sf.read(file_path, dtype='float32')
+        audio, fs = sf.read(path, dtype="float32")
         if audio.ndim > 1:
             audio = audio[:, 0]
 
         audio = normalize_audio(audio)
-        processed = real_time_agc(audio)
+        processed = real_time_agc(audio, agc_state)
 
-        processed_path = os.path.splitext(file_path)[0] + "_processed.wav"
-        sf.write(processed_path, processed, fs_local)
+        out_path = os.path.splitext(path)[0] + "_processed.wav"
+        sf.write(out_path, processed, fs)
 
-        plot_signals(audio, processed, fs_local, processed_path)
+        plot_signals(audio, processed, fs, out_path)
         messagebox.showinfo("Done", "File processed successfully")
 
-    # ===============================
-    # Recording
-    # ===============================
-    def audio_callback(indata, frames, time, status):
-        if status:
-            print(status, file=sys.stderr)
-        audio_queue.put(indata[:, 0].copy())
-        original_audio_buffer.append(indata[:, 0].copy())
-
-    def record_audio():
-        reset_agc()
-        with sd.InputStream(samplerate=fs, channels=1, callback=audio_callback):
-            while recording:
-                sd.sleep(20)
-
-    def process_real_time_audio():
-        with sd.OutputStream(samplerate=fs, channels=1) as out:
-            while recording or not audio_queue.empty():
-                try:
-                    chunk = audio_queue.get(timeout=0.1)
-                except queue.Empty:
-                    continue
-
-                chunk = normalize_audio(chunk)
-                processed = real_time_agc(chunk)
-                processed_audio_buffer.append(processed)
-                out.write(processed.reshape(-1, 1))
-
     def start_recording():
-        nonlocal recording
-        recording = True
-        original_audio_buffer.clear()
-        processed_audio_buffer.clear()
+        agc_state.reset()
+        stop_flag["stop"] = False
 
-        threading.Thread(target=record_audio, daemon=True).start()
-        threading.Thread(target=process_real_time_audio, daemon=True).start()
+        original_buffer.clear()
+        processed_buffer.clear()
+
+        start_realtime(
+            agc_state,
+            stop_flag,
+            original_buffer,
+            processed_buffer
+        )
 
     def stop_recording():
-        nonlocal recording
-        recording = False
+        # 1️⃣ Signal threads to stop
+        stop_flag["stop"] = True
 
-        if not original_audio_buffer or not processed_audio_buffer:
+        # 2️⃣ Let audio threads flush remaining buffers
+        time.sleep(0.4)
+
+        if not original_buffer or not processed_buffer:
             messagebox.showwarning(
                 "No Data",
-                "Please record at least 1–2 seconds of audio."
+                "No audio was recorded."
             )
             return
 
-        recorded = np.concatenate(original_audio_buffer)
-        processed = np.concatenate(processed_audio_buffer)
+        # 3️⃣ Finalize buffers
+        recorded = np.concatenate(original_buffer)
+        processed = np.concatenate(processed_buffer)
 
-        save_file = filedialog.asksaveasfilename(defaultextension=".wav")
-        if save_file:
-            sf.write(save_file, recorded, fs)
-            sf.write(save_file.replace(".wav", "_processed.wav"), processed, fs)
-            plot_signals(recorded, processed, fs, save_file)
+        # 4️⃣ Ask user where to save
+        save_path = filedialog.asksaveasfilename(
+            defaultextension=".wav",
+            filetypes=[("WAV files", "*.wav")]
+        )
+
+        if not save_path:
+            return
+
+        # 5️⃣ Write files
+        sf.write(save_path, recorded, FS)
+        sf.write(
+            save_path.replace(".wav", "_processed.wav"),
+            processed,
+            FS
+        )
+
+        # 6️⃣ Plot results
+        plot_signals(recorded, processed, FS, save_path)
 
     # ===============================
-    # GUI
+    # Start GUI
     # ===============================
-    root = tk.Tk()
-    root.title("Real-Time AGC")
+    handlers = {
+        "file": process_file,
+        "start": start_recording,
+        "stop": stop_recording
+    }
 
-    tk.Button(root, text="Select WAV File", command=process_file).pack(pady=5)
-    tk.Button(root, text="Start Recording", command=start_recording).pack(pady=5)
-    tk.Button(root, text="Stop Recording", command=stop_recording).pack(pady=5)
-
-    root.mainloop()
-
+    run_gui(handlers)
 
 
 if __name__ == "__main__":
