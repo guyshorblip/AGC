@@ -1,4 +1,8 @@
 numpy
 matplotlib
 sounddevice
-soundfile
+tkinter
+queue
+os
+sys
+threading
